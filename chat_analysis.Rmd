@@ -1,0 +1,206 @@
+---
+title: "WhatsApp Conversational Analysis"
+subtitle: "Thread initiation and first respondents"
+author: "Shubhankar Tiwari"
+date: '`r format(Sys.Date(), "%B %d, %Y")`'
+output:
+  rmdformats::readthedown:
+    highlight: kate
+    #self_contained: false
+    #code_folding: hide
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(warning=FALSE,message = FALSE,tidy=TRUE,cache=TRUE)
+```
+
+## Shiny App
+
+Please check out the [__SHINY APP__](https://shubhstiws.shinyapps.io/Whatsapp_UMN_Shiny/) if you want to skip over the analysis
+
+## Exporting Data from WhatsApp
+
+I used the export functionality from whatsapp to get the text data from my iPhone to my email account. As I was not analyzing media and links I chose to exclude them to decrease the size of the data set. I copied the text data into a csv files using excel and cleared of white spaces and corrected formatting to be able to load it into R.
+
+It was only possible because this was a small data set which could be easily handles by Excel. Most WhatsApp data sets are humongous and require R/ python for processing.
+
+Some of the common functions I used were:
+
+1. Load data using the text connector
+
+2. Parse date and time, convert to military time and extracts hours, minutes and seconds
+
+3. Logical checks to confirm if parsing was correct
+
+4. Format names with special characters and wrong spellings
+
+## Loading libraries
+
+```{r}
+suppressPackageStartupMessages({
+library(readr)
+library(zoo)
+library(dplyr)
+library(tidyr)
+library(chorddiag)
+library(htmlwidgets)
+library(DT)
+})
+```
+
+
+## Loading file
+
+```{r}
+df = read.csv('chat_raw.csv',sep=',')
+df$date_time = paste(df$date,df$military_time)
+df$date_time <- strptime(df$date_time,format="%m-%d-%y %H:%M:%S")
+datatable(head(df))
+
+```
+
+## Data Processing
+
+### Calculating time to respond
+
+We need to account for the replies to the person who initiated the thread. This can be calculated by a lag 1 time. The lag1 time is the time stamp of the next chat message in the data set
+
+```{r}
+reply = diff(df$date_time,lag=1)
+reply[4416] = 0
+
+df = data.frame(cbind(df,reply))
+#head(df)
+#summary(df)
+
+```
+
+
+### Assumptions
+
+Once we have the lag we now know the consecutive time diff between messages. I have used a simple rule that __if after posting a message no body responds for 30 minutes (1800 seconds), I believe that people have moved on and any message after 30 minutes is a new thread in itself__
+
+This is a strong assumptions and may bias the analysis as:
+
+1. People may be posting announcements (may or may not require any response)
+
+2. Few people do not instantaneously reply to messages. The respond only during certain periods of the day like morning and evening
+
+But to simplify and start the analysis I felt this __naive assumption__ to be good enough.
+
+```{r}
+df$thread = ifelse(df$reply < 1800,1,0)
+```
+
+### Marking thread start points
+
+```{r}
+##Final df
+#df$thread_start
+#df$first_respondedt
+#df$count
+
+df$tp = lag(df$thread)
+#View(df)
+
+thread_start = ifelse(df$tp==0,levels(df$name),NA)
+thread_start = as.data.frame(table(thread_start))
+
+```
+
+### Assigning groups to each thread and the people in it
+
+All the messages between two consecutive `0` have been marked as a part of a thread and we get a total `881` unique threads
+
+```{r}
+t = df$tp
+t[is.na(t)] <- 0
+counter = 0
+g=c()
+g[1] = 999
+
+for (i in 1:length(t)){
+  temp = ifelse(t[i]==0, 1,0)
+  counter = counter+temp
+  g[i]=counter  
+}
+
+df = cbind(df,g)
+#View(df)
+length(unique(df$g))
+```
+
+### Processing data for visualization
+
+The format for the visualization is a matrix which has rows as the name of the person who initiated the thread and the columns as the first respondent
+
+#### No of people involved threads
+
+```{r}
+df$date_time = as.Date(df$date_time)
+# average people involved in a thread
+datatable(df %>% group_by(g) %>% summarise(people_involved = n_distinct(name)) %>% ungroup())
+```
+
+#### People asking the real questions - no responses
+
+```{r}
+# People asking the real questions - no responses
+ignored = df %>% distinct(name,g) %>% group_by(g) %>% filter (n_distinct(name) == 1) %>% group_by(name) %>% summarise(no_response = n()) %>% arrange(desc(no_response))
+
+datatable(ignored)
+```
+
+#### Data for the chord diagram
+
+```{r}
+temp = df %>% distinct(name,g)
+#df %>% distinct(name,g) %>% group_by(g) %>% filter(row_number()==1 | row_number()==n())
+
+# thread with thread initiator and first respondent
+chartData = df %>% distinct(name,g) %>% group_by(g) %>% filter (n_distinct(name) > 1) %>% filter(row_number()==1 | row_number()==2) %>% select(g,name) %>% group_by(g) %>% mutate(initiate = row_number()) %>% spread(initiate,name) %>% select(thread = g, thread_start = `1`,first_respondent=`2`) %>% group_by(thread_start,first_respondent) %>% summarise(count=n()) %>% spread(first_respondent,count,fill = 0)
+```
+
+#### Converting data to matrix format and visualizing
+
+```{r}
+
+temp = chartData
+
+s = temp$thread_start
+e = colnames(temp)[2:ncol(temp)]
+srm = as.matrix(temp[, -1])
+dimnames(srm) = list(Thread_Start = as.vector(s),First_Respondent = as.vector(e))
+#mycols = c("#F44336", "#3F51B5", "#4CAF50", "#FFC107")
+plot = chorddiag(srm, showGroupnames = TRUE, type = "bipartite", showTicks = FALSE, 
+    groupnameFontsize = 10, categorynameFontsize = 16,height = 1000)
+
+
+```
+
+## Visualization
+
+```{r}
+plot
+```
+
+### Insights
+
+1. As evident the plot is a mess. There is too much data to understand any pattern. At first I thought of building an animation which could project the increase in density as time progress but even that is hard to understand and draw anything meaningful. Hence I decide to build an interactive  shiny app which could be used to modify the chart for a given time frame. 
+
+2. Please check out the [SHINY APP](https://shubhstiws.shinyapps.io/Whatsapp_UMN_Shiny/) and play around with the dates
+
+3. You can also hover on the chords to get the number of threads to which a particular person has acted as the first respondent
+
+## Next Steps
+
+1. Logical next step would be analyse the behavior of the people responding the most/ initiating the most threads to find how are they different other users (who are second/ third respondents)
+
+2. We can also do topic modelling and sentiment analysis to see what type of threads gets the most responses or get respondent the fastest
+
+3. The animation can be improved and filters like country, Student name etc can be added
+
+## Source
+
+[Github](https://github.com/shubhstiws/WhatsApp_UMN)
+
